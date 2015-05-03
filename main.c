@@ -8,6 +8,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h> 
+#include <poll.h>
 
 void error(const char *msg)
 {
@@ -19,7 +20,8 @@ void run_client(struct hostent *server, int portno)
 {
 	int sockfd, n, rt;
 	struct sockaddr_in serv_addr;
-	char buffer[256];
+	char buffer[256], out[256];
+	struct pollfd fds[1];
 
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) 
@@ -37,15 +39,38 @@ void run_client(struct hostent *server, int portno)
 	printf("Please enter the message: ");
 	bzero(buffer,256);
 	fgets(buffer,255,stdin);
+
+	fds[0].fd = sockfd;
+	fds[0].events = POLLOUT;
+	fds[0].revents = 0;
+
 	while (1) {
-		n = write(sockfd,buffer,strlen(buffer));
-		if (n < 0) 
-			error("ERROR writing to socket");
-		bzero(buffer,256);
-		n = read(sockfd,buffer,255);
-		if (n < 0) 
-			error("ERROR reading from socket");
-		printf("%s\n",buffer);
+		fds[0].revents = 0;
+		rt = poll(fds, 1, -1);
+		if (rt < 0)
+			error("polling error");
+
+		if (fds[0].revents) {
+			if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				printf("ERROR: revent  0x%x, POLLERR 0x%x, POLLHUP 0x%x, POLLNVAL 0x%x\n",fds[0].revents, POLLERR, POLLHUP, POLLNVAL);
+				break;
+			}
+			if (fds[0].revents & POLLOUT) {
+				n = write(sockfd, buffer, strlen(buffer));
+				if (n < 0)
+					error("ERROR writing to socket");
+				fds[0].events = POLLIN;
+			}
+
+			if (fds[0].revents & POLLIN) {
+				out[0] = '\0';
+				n = read(sockfd, out, 255);
+				if (n < 0)
+					error("ERROR reading from socket");
+				printf("%s\n",out);
+				fds[0].events = POLLOUT;
+			}
+		}
 	}
 	close(sockfd);
 }
@@ -57,7 +82,7 @@ void run_server(int portno)
 	socklen_t clilen;
 	char buffer[256];
 	struct sockaddr_in serv_addr, cli_addr;
-	int n, rt;
+	int i, n, rt;
 
 	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) 
@@ -79,12 +104,14 @@ void run_server(int portno)
 				&clilen);
 		if (newsockfd < 0) 
 			error("ERROR on accept");
-		bzero(buffer,256);
-		n = read(newsockfd,buffer,255);
-		if (n < 0) error("ERROR reading from socket");
-		printf("Here is the message: %s\n",buffer);
-		n = write(newsockfd,"I got your message",18);
-		if (n < 0) error("ERROR writing to socket");
+		for (i = 0; i < 10; i++) {
+			bzero(buffer,256);
+			n = read(newsockfd,buffer,255);
+			if (n < 0) error("ERROR reading from socket");
+			printf("Here is the message: %s\n",buffer);
+			n = write(newsockfd,"I got your message",18);
+			if (n < 0) error("ERROR writing to socket");
+		}
 		close(newsockfd);
 	}
 	close(sockfd);
