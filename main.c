@@ -39,6 +39,8 @@
 extern char *optarg;
 extern int optind, optopt;
 static int use_rs = USE_RS;
+static struct rdma_addrinfo rai_hints;
+static struct addrinfo ai_hints;
 
 #define rs_socket(f,t,p)  use_rs ? rsocket(f,t,p)  : socket(f,t,p)
 #define rs_bind(s,a,l)    use_rs ? rbind(s,a,l)    : bind(s,a,l)
@@ -66,36 +68,39 @@ void error(const char *msg)
 	exit(1);
 }
 
-void run_client(const char *addr, int portno)
+void run_client(int use_rgai,char *addr, char *port)
 {
-	struct hostent *server;
 	int sockfd, n, rt;
 	struct sockaddr_in serv_addr;
-	char buffer[256], out[256];
+	char buffer[256] = "JOPA" , out[256];
 	struct pollfd fds[1];
+	int portno;
+	struct rdma_addrinfo *rai = NULL;
+	struct  addrinfo *ai;
 
-	server = gethostbyname(addr);
-	if (server == NULL) {
-		fprintf(stderr,"ERROR, no such host\n");
-		exit(0);
-	}
+	portno = atoi(port);
 
-	sockfd = rs_socket(AF_INET, SOCK_STREAM, 0);
+	rt = use_rgai ? rdma_getaddrinfo(addr, port, &rai_hints, &rai) :
+		getaddrinfo(addr, port, &ai_hints, &ai);
+
+	if (rt)
+		error("getaddrinfo");
+
+	sockfd = rai ? rs_socket(rai->ai_family, SOCK_STREAM, 0):
+		rs_socket(ai->ai_family, SOCK_STREAM, 0);
+
 	if (sockfd < 0) 
 		error("ERROR opening socket");
 
-	bzero((char *) &serv_addr, sizeof(serv_addr));
-	serv_addr.sin_family = AF_INET;
-	bcopy((char *)server->h_addr, 
-			(char *)&serv_addr.sin_addr.s_addr,
-			server->h_length);
-	serv_addr.sin_port = htons(portno);
-	rt = rs_connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr));
 	if (rt < 0)
 		error("ERROR connecting");
+/*
 	printf("Please enter the message: ");
 	bzero(buffer,256);
 	fgets(buffer,255,stdin);
+*/
+	rt = rai ? rs_connect(sockfd, rai->ai_dst_addr, rai->ai_dst_len):
+		rs_connect(sockfd, ai->ai_addr, ai->ai_addrlen);
 
 	fds[0].fd = sockfd;
 	fds[0].events = POLLOUT;
@@ -103,7 +108,7 @@ void run_client(const char *addr, int portno)
 
 	while (1) {
 		fds[0].revents = 0;
-		rt = poll(fds, 1, -1);
+		rt = rs_poll(fds, 1, -1);
 		if (rt < 0)
 			error("polling error");
 
@@ -113,7 +118,7 @@ void run_client(const char *addr, int portno)
 				break;
 			}
 			if (fds[0].revents & POLLOUT) {
-				n = write(sockfd, buffer, strlen(buffer));
+				n = rs_send(sockfd, buffer, strlen(buffer), 0);
 				if (n < 0)
 					error("ERROR writing to socket");
 				fds[0].events = POLLIN;
@@ -121,7 +126,7 @@ void run_client(const char *addr, int portno)
 
 			if (fds[0].revents & POLLIN) {
 				out[0] = '\0';
-				n = read(sockfd, out, 255);
+				n = rs_recv(sockfd, out, 255, 0);
 				if (n < 0)
 					error("ERROR reading from socket");
 				printf("%s\n",out);
@@ -129,18 +134,34 @@ void run_client(const char *addr, int portno)
 			}
 		}
 	}
-	close(sockfd);
+	rs_close(sockfd);
 }
 
-void run_server(const char *addr, int portno)
+void run_server(int use_rgai, char *addr, char *port)
 {
-	int sockfd, newsockfd;
+	int sockfd, newsockfd, portno;
 	socklen_t clilen;
 	char buffer[256];
 	struct sockaddr_in serv_addr, cli_addr;
 	int i, n, rt;
+	struct rdma_addrinfo *rai = NULL;
+	struct addrinfo *ai;
 
-	sockfd = rs_socket(AF_INET, SOCK_STREAM, 0);
+	portno = atoi(port);
+
+	if (use_rgai) {
+		rai_hints.ai_flags |= RAI_PASSIVE;
+		rt = rdma_getaddrinfo(addr, port, &rai_hints, &rai);
+	} else {
+		ai_hints.ai_flags |= AI_PASSIVE;
+		rt = getaddrinfo(addr, port, &ai_hints, &ai);
+	}
+	if (rt)
+		error("getaddrinfo");
+
+	sockfd = rai ? rs_socket(rai->ai_family, SOCK_STREAM, 0):
+		rs_socket(ai->ai_family, SOCK_STREAM, 0);
+
 	if (sockfd < 0) 
 		error("ERROR opening socket");
 
@@ -148,8 +169,8 @@ void run_server(const char *addr, int portno)
 	serv_addr.sin_family = AF_INET;
 	serv_addr.sin_addr.s_addr = INADDR_ANY;
 	serv_addr.sin_port = htons(portno);
-	rt = rs_bind(sockfd, (struct sockaddr *) &serv_addr,
-				sizeof(serv_addr));
+	rt = rai ? rs_bind(sockfd, rai->ai_src_addr, rai->ai_src_len):
+			rs_bind(sockfd, ai->ai_addr, ai->ai_addrlen);
 	if (rt < 0)
 		error("ERROR on binding");
 	rs_listen(sockfd,5);
@@ -162,15 +183,17 @@ void run_server(const char *addr, int portno)
 			error("ERROR on accept");
 		for (i = 0; i < 10; i++) {
 			bzero(buffer,256);
-			n = read(newsockfd,buffer,255);
+			n = rs_recv(newsockfd,buffer, 255, 0);
 			if (n < 0) error("ERROR reading from socket");
 			printf("Here is the message: %s\n",buffer);
-			n = write(newsockfd,"I got your message",18);
+			n = rs_send(newsockfd,"I got your message", 18, 0);
 			if (n < 0) error("ERROR writing to socket");
 		}
-		close(newsockfd);
+		rs_close(newsockfd);
 	}
-	close(sockfd);
+	rs_close(sockfd);
+	if (rai)
+		rdma_freeaddrinfo(rai);
 }
 
 void print_usage(const char *appname)
@@ -179,6 +202,7 @@ void print_usage(const char *appname)
 	printf("\t[-s server_address]\n");
 	printf("\t[-b bind_address]\n");
 	printf("\t[-f address_format]\n");
+	printf("\t[-p port_number]\n");
 	printf("\t    name, ip, ipv6, or gid\n");
 }
 
@@ -188,9 +212,7 @@ int main(int argc, char *argv[])
 	struct hostent *server;
 	char *addr, *port = "4555";
 	int op, ret;
-	int use_rgai;
-	struct rdma_addrinfo rai_hints;
-	struct addrinfo ai_hints;
+	int use_rgai = 0;
 
 
 	while ((op = getopt(argc, argv, "s:b:f:p:")) != -1) {
@@ -221,15 +243,14 @@ int main(int argc, char *argv[])
 				print_usage(argv[0]);
 		}
 	}
-
+/*
 	if (op < 0) {
 		print_usage(argv[0]);
 		exit(1);
 	}
+*/
 
-	portno = atoi(port);
-
-	is_server ? run_server(addr, portno): run_client(addr, portno);
+	is_server ? run_server(use_rgai, addr, port): run_client(use_rgai, addr, port);
 
 	return 0; 
 }
