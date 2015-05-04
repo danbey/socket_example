@@ -82,6 +82,12 @@ void run_client(int use_rgai,char *addr, char *port)
 	int msg_count = 1, sock_count;
 
 	memset(fds, 0, sizeof(fds));
+	memset(buffer, 0, sizeof(buffer));
+	/*
+	   printf("Please enter the message: ");
+	   bzero(buffer,256);
+	   fgets(buffer,MSG_SIZE,stdin);
+	   */
 
 	for (i = 0; i < MAX_NUM_RSOCKET; i++)
 		fds[i].fd = -1;
@@ -92,29 +98,31 @@ void run_client(int use_rgai,char *addr, char *port)
 	if (rt)
 		error("getaddrinfo");
 
-	sockfd = rai ? rs_socket(rai->ai_family, SOCK_STREAM, 0):
-		rs_socket(ai->ai_family, SOCK_STREAM, 0);
+	for (i = 0; i < MAX_NUM_RSOCKET; i++) {
 
-	if (sockfd < 0) 
-		error("ERROR opening socket");
+		sockfd = rai ? rs_socket(rai->ai_family, SOCK_STREAM, 0):
+			rs_socket(ai->ai_family, SOCK_STREAM, 0);
 
-	if (rt < 0)
-		error("ERROR connecting");
-/*
-	printf("Please enter the message: ");
-	bzero(buffer,256);
-	fgets(buffer,MSG_SIZE,stdin);
-*/
-	rt = rai ? rs_connect(sockfd, rai->ai_dst_addr, rai->ai_dst_len):
-		rs_connect(sockfd, ai->ai_addr, ai->ai_addrlen);
+		if (sockfd < 0){
+			char msg[512];
+			sprintf(msg,"ERROR opening. position %d", i);
+			error(msg);
+		}
 
-	if (rt)
-		error("connection");
+		rt = rai ? rs_connect(sockfd, rai->ai_dst_addr, rai->ai_dst_len):
+			rs_connect(sockfd, ai->ai_addr, ai->ai_addrlen);
 
-	memset(buffer, 0, sizeof(buffer));
-	fds[0].fd = sockfd;
-	fds[0].events = POLLOUT;
-	fds[0].revents = 0;
+		if (rt) {
+			char msg[512];
+			sprintf(msg,"ERROR connecting to server. position %d, socket %d", i, sockfd);
+			fprintf(stderr, "%s\n", msg);
+			break;
+		}
+
+		fds[i].fd = sockfd;
+		fds[i].events = POLLOUT;
+		fds[i].revents = 0;
+	}
 
 	while (1) {
 		fds[0].revents = 0;
