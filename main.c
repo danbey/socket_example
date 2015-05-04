@@ -9,6 +9,56 @@
 #include <netinet/in.h>
 #include <netdb.h> 
 #include <poll.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <errno.h>
+#include <getopt.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/wait.h>
+#include <netdb.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <unistd.h>
+
+#include <rdma/rdma_cma.h>
+#include <rdma/rsocket.h>
+
+#include <infiniband/ib.h>
+
+
+#ifndef USE_RS
+#define USE_RS 0
+#endif
+
+extern char *optarg;
+extern int optind, optopt;
+static int use_rs = USE_RS;
+
+#define rs_socket(f,t,p)  use_rs ? rsocket(f,t,p)  : socket(f,t,p)
+#define rs_bind(s,a,l)    use_rs ? rbind(s,a,l)    : bind(s,a,l)
+#define rs_listen(s,b)    use_rs ? rlisten(s,b)    : listen(s,b)
+#define rs_connect(s,a,l) use_rs ? rconnect(s,a,l) : connect(s,a,l)
+#define rs_accept(s,a,l)  use_rs ? raccept(s,a,l)  : accept(s,a,l)
+#define rs_shutdown(s,h)  use_rs ? rshutdown(s,h)  : shutdown(s,h)
+#define rs_close(s)       use_rs ? rclose(s)       : close(s)
+#define rs_recv(s,b,l,f)  use_rs ? rrecv(s,b,l,f)  : recv(s,b,l,f)
+#define rs_send(s,b,l,f)  use_rs ? rsend(s,b,l,f)  : send(s,b,l,f)
+#define rs_recvfrom(s,b,l,f,a,al) \
+	        use_rs ? rrecvfrom(s,b,l,f,a,al) : recvfrom(s,b,l,f,a,al)
+#define rs_sendto(s,b,l,f,a,al) \
+	        use_rs ? rsendto(s,b,l,f,a,al)   : sendto(s,b,l,f,a,al)
+#define rs_poll(f,n,t)    use_rs ? rpoll(f,n,t)    : poll(f,n,t)
+#define rs_fcntl(s,c,p)   use_rs ? rfcntl(s,c,p)   : fcntl(s,c,p)
+#define rs_setsockopt(s,l,n,v,ol) \
+	        use_rs ? rsetsockopt(s,l,n,v,ol) : setsockopt(s,l,n,v,ol)
+#define rs_getsockopt(s,l,n,v,ol) \
+	        use_rs ? rgetsockopt(s,l,n,v,ol) : getsockopt(s,l,n,v,ol)
 
 void error(const char *msg)
 {
@@ -16,14 +66,21 @@ void error(const char *msg)
 	exit(1);
 }
 
-void run_client(struct hostent *server, int portno)
+void run_client(const char *addr, int portno)
 {
+	struct hostent *server;
 	int sockfd, n, rt;
 	struct sockaddr_in serv_addr;
 	char buffer[256], out[256];
 	struct pollfd fds[1];
 
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	server = gethostbyname(addr);
+	if (server == NULL) {
+		fprintf(stderr,"ERROR, no such host\n");
+		exit(0);
+	}
+
+	sockfd = rs_socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) 
 		error("ERROR opening socket");
 
@@ -33,7 +90,7 @@ void run_client(struct hostent *server, int portno)
 			(char *)&serv_addr.sin_addr.s_addr,
 			server->h_length);
 	serv_addr.sin_port = htons(portno);
-	rt = connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr));
+	rt = rs_connect(sockfd,(struct sockaddr *) &serv_addr,sizeof(serv_addr));
 	if (rt < 0)
 		error("ERROR connecting");
 	printf("Please enter the message: ");
@@ -75,16 +132,15 @@ void run_client(struct hostent *server, int portno)
 	close(sockfd);
 }
 
-void run_server(int portno)
+void run_server(const char *addr, int portno)
 {
 	int sockfd, newsockfd;
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
 	socklen_t clilen;
 	char buffer[256];
 	struct sockaddr_in serv_addr, cli_addr;
 	int i, n, rt;
 
-	sockfd = socket(AF_INET, SOCK_STREAM, 0);
+	sockfd = rs_socket(AF_INET, SOCK_STREAM, 0);
 	if (sockfd < 0) 
 		error("ERROR opening socket");
 
@@ -92,14 +148,14 @@ void run_server(int portno)
 	serv_addr.sin_family = AF_INET;
 	serv_addr.sin_addr.s_addr = INADDR_ANY;
 	serv_addr.sin_port = htons(portno);
-	rt = bind(sockfd, (struct sockaddr *) &serv_addr,
+	rt = rs_bind(sockfd, (struct sockaddr *) &serv_addr,
 				sizeof(serv_addr));
 	if (rt < 0)
 		error("ERROR on binding");
-	listen(sockfd,5);
+	rs_listen(sockfd,5);
 	clilen = sizeof(cli_addr);
 	while (1) {
-		newsockfd = accept(sockfd, 
+		newsockfd = rs_accept(sockfd,
 				(struct sockaddr *) &cli_addr, 
 				&clilen);
 		if (newsockfd < 0) 
@@ -117,30 +173,63 @@ void run_server(int portno)
 	close(sockfd);
 }
 
+void print_usage(const char *appname)
+{
+	printf("usage: %s\n", appname);
+	printf("\t[-s server_address]\n");
+	printf("\t[-b bind_address]\n");
+	printf("\t[-f address_format]\n");
+	printf("\t    name, ip, ipv6, or gid\n");
+}
+
 int main(int argc, char *argv[])
 {
 	int is_server, portno;
 	struct hostent *server;
+	char *addr, *port = "4555";
+	int op, ret;
+	int use_rgai;
+	struct rdma_addrinfo rai_hints;
+	struct addrinfo ai_hints;
 
-	if (argc < 2) {
-		fprintf(stderr,"ERROR, no port provided\n");
-		fprintf(stderr,"usage: server : %s port\n", argv[0]);
-		fprintf(stderr,"usage: client : %s port hostname\n", argv[0]);
-		exit(1);
-	}
 
-	is_server = argc < 3 ? 1: 0;
-	portno = atoi(argv[1]);
-
-	if (!is_server) {
-		server = gethostbyname(argv[2]);
-		if (server == NULL) {
-			fprintf(stderr,"ERROR, no such host\n");
-			exit(0);
+	while ((op = getopt(argc, argv, "s:b:f:p:")) != -1) {
+		switch (op) {
+			case 's':
+				addr = optarg;
+				is_server = 0;
+				break;
+			case 'b':
+				addr = optarg;
+				is_server = 1;
+				break;
+			case 'f':
+				if (!strncasecmp("ip", optarg, 2)) {
+					ai_hints.ai_flags = AI_NUMERICHOST;
+				} else if (!strncasecmp("gid", optarg, 3)) {
+					rai_hints.ai_flags = RAI_NUMERICHOST | RAI_FAMILY;
+					rai_hints.ai_family = AF_IB;
+					use_rgai = 1;
+				} else {
+					fprintf(stderr, "Warning: unknown address format\n");
+				}
+				break;
+			case 'p':
+				port = optarg;
+				break;
+			default:
+				print_usage(argv[0]);
 		}
 	}
 
-	is_server ? run_server(portno): run_client(server, portno); 
+	if (op < 0) {
+		print_usage(argv[0]);
+		exit(1);
+	}
+
+	portno = atoi(port);
+
+	is_server ? run_server(addr, portno): run_client(addr, portno);
 
 	return 0; 
 }
