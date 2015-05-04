@@ -33,6 +33,7 @@
 
 #define MSG_SIZE 255
 #define MAX_NUM_RSOCKET 1024
+#define MAX_MSG_COUNT 1024
 
 #ifndef USE_RS
 #define USE_RS 0
@@ -147,7 +148,7 @@ void run_client(int use_rgai,char *addr, char *port)
 					continue;
 				}
 				if (fds[i].revents & POLLOUT) {
-					if (msg_count < 10) {
+					if (msg_count < MAX_MSG_COUNT ) {
 						strcpy(buffer, "JOPA");
 						msg_count++;
 					} else {
