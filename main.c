@@ -31,6 +31,7 @@
 
 #include <infiniband/ib.h>
 
+#define MSG_SIZE 255
 
 #ifndef USE_RS
 #define USE_RS 0
@@ -77,6 +78,7 @@ void run_client(int use_rgai,char *addr, char *port)
 	int portno;
 	struct rdma_addrinfo *rai = NULL;
 	struct  addrinfo *ai;
+	int count = 1;
 
 	portno = atoi(port);
 
@@ -97,7 +99,7 @@ void run_client(int use_rgai,char *addr, char *port)
 /*
 	printf("Please enter the message: ");
 	bzero(buffer,256);
-	fgets(buffer,255,stdin);
+	fgets(buffer,MSG_SIZE,stdin);
 */
 	rt = rai ? rs_connect(sockfd, rai->ai_dst_addr, rai->ai_dst_len):
 		rs_connect(sockfd, ai->ai_addr, ai->ai_addrlen);
@@ -105,6 +107,8 @@ void run_client(int use_rgai,char *addr, char *port)
 	fds[0].fd = sockfd;
 	fds[0].events = POLLOUT;
 	fds[0].revents = 0;
+
+	memset(buffer, 0, sizeof(buffer));
 
 	while (1) {
 		fds[0].revents = 0;
@@ -118,7 +122,15 @@ void run_client(int use_rgai,char *addr, char *port)
 				break;
 			}
 			if (fds[0].revents & POLLOUT) {
-				n = rs_send(sockfd, buffer, strlen(buffer), 0);
+				if (count < 10) {
+					strcpy(buffer, "JOPA");
+					count++;
+				} else {
+					memset(buffer, 0, sizeof(buffer));
+					count = 0;
+				}
+
+				n = rs_send(sockfd, buffer, MSG_SIZE, 0);
 				if (n < 0)
 					error("ERROR writing to socket");
 				fds[0].events = POLLIN;
@@ -126,7 +138,7 @@ void run_client(int use_rgai,char *addr, char *port)
 
 			if (fds[0].revents & POLLIN) {
 				out[0] = '\0';
-				n = rs_recv(sockfd, out, 255, 0);
+				n = rs_recv(sockfd, out, MSG_SIZE, 0);
 				if (n < 0)
 					error("ERROR reading from socket");
 				printf("%s\n",out);
@@ -141,11 +153,12 @@ void run_server(int use_rgai, char *addr, char *port)
 {
 	int sockfd, newsockfd, portno;
 	socklen_t clilen;
-	char buffer[256];
+	char buffer[256], response[256] = "I got your message";
 	struct sockaddr_in serv_addr, cli_addr;
 	int i, n, rt;
 	struct rdma_addrinfo *rai = NULL;
 	struct addrinfo *ai;
+	struct pollfd fds[1];
 
 	portno = atoi(port);
 
@@ -165,31 +178,48 @@ void run_server(int use_rgai, char *addr, char *port)
 	if (sockfd < 0) 
 		error("ERROR opening socket");
 
-	bzero((char *) &serv_addr, sizeof(serv_addr));
-	serv_addr.sin_family = AF_INET;
-	serv_addr.sin_addr.s_addr = INADDR_ANY;
-	serv_addr.sin_port = htons(portno);
 	rt = rai ? rs_bind(sockfd, rai->ai_src_addr, rai->ai_src_len):
 			rs_bind(sockfd, ai->ai_addr, ai->ai_addrlen);
 	if (rt < 0)
 		error("ERROR on binding");
 	rs_listen(sockfd,5);
-	clilen = sizeof(cli_addr);
+
+	fds[0].fd = sockfd;
+	fds[0].events = POLLIN;
+	fds[0].revents = 0;
+
 	while (1) {
-		newsockfd = rs_accept(sockfd,
-				(struct sockaddr *) &cli_addr, 
-				&clilen);
-		if (newsockfd < 0) 
-			error("ERROR on accept");
-		for (i = 0; i < 10; i++) {
-			bzero(buffer,256);
-			n = rs_recv(newsockfd,buffer, 255, 0);
-			if (n < 0) error("ERROR reading from socket");
-			printf("Here is the message: %s\n",buffer);
-			n = rs_send(newsockfd,"I got your message", 18, 0);
-			if (n < 0) error("ERROR writing to socket");
+		rt = rs_poll(fds, 1, -1);
+		if (rt < 0)
+			error("polling error");
+
+		if (fds[0].revents) {
+			if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				printf("ERROR: revent  0x%x, POLLERR 0x%x, POLLHUP 0x%x, POLLNVAL 0x%x\n",fds[0].revents, POLLERR, POLLHUP, POLLNVAL);
+				break;
+			}
+			if (fds[0].revents) {
+				fds[0].revents = 0;
+				newsockfd = rs_accept(sockfd,
+						(struct sockaddr *) &cli_addr,
+						&clilen);
+				if (newsockfd < 0)
+					error("ERROR on accept");
+				while(1) {
+					bzero(buffer,256);
+					n = rs_recv(newsockfd,buffer, MSG_SIZE, 0);
+					if (n < 0) error("ERROR reading from socket");
+					printf("Here is the message: %s\n",buffer);
+					if (buffer[0] == '\0') {
+						rs_close(newsockfd);
+						break;
+					}
+					n = rs_send(newsockfd, response, MSG_SIZE, 0);
+					if (n < 0) error("ERROR writing to socket");
+				}
+			}
+
 		}
-		rs_close(newsockfd);
 	}
 	rs_close(sockfd);
 	if (rai)
