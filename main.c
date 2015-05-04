@@ -104,11 +104,13 @@ void run_client(int use_rgai,char *addr, char *port)
 	rt = rai ? rs_connect(sockfd, rai->ai_dst_addr, rai->ai_dst_len):
 		rs_connect(sockfd, ai->ai_addr, ai->ai_addrlen);
 
+	if (rt)
+		error("connection");
+
+	memset(buffer, 0, sizeof(buffer));
 	fds[0].fd = sockfd;
 	fds[0].events = POLLOUT;
 	fds[0].revents = 0;
-
-	memset(buffer, 0, sizeof(buffer));
 
 	while (1) {
 		fds[0].revents = 0;
@@ -151,16 +153,20 @@ void run_client(int use_rgai,char *addr, char *port)
 
 void run_server(int use_rgai, char *addr, char *port)
 {
-	int sockfd, newsockfd, portno;
+	int sockfd;
 	socklen_t clilen;
 	char buffer[256], response[256] = "I got your message";
 	struct sockaddr_in serv_addr, cli_addr;
 	int i, n, rt;
 	struct rdma_addrinfo *rai = NULL;
 	struct addrinfo *ai;
-	struct pollfd fds[1];
+	struct pollfd fds[1024];
+	int nextfd = 1;
 
-	portno = atoi(port);
+	memset(fds, 0, sizeof(fds));
+
+	for (i = 0; i <= 1024; i++)
+		fds[i].fd = -1;
 
 	if (use_rgai) {
 		rai_hints.ai_flags |= RAI_PASSIVE;
@@ -189,7 +195,7 @@ void run_server(int use_rgai, char *addr, char *port)
 	fds[0].revents = 0;
 
 	while (1) {
-		rt = rs_poll(fds, 1, -1);
+		rt = rs_poll(fds, 1024, -1);
 		if (rt < 0)
 			error("polling error");
 
@@ -199,26 +205,49 @@ void run_server(int use_rgai, char *addr, char *port)
 				break;
 			}
 			if (fds[0].revents) {
+				int newsockfd = -1;
+
 				fds[0].revents = 0;
 				newsockfd = rs_accept(sockfd,
 						(struct sockaddr *) &cli_addr,
 						&clilen);
 				if (newsockfd < 0)
 					error("ERROR on accept");
-				while(1) {
-					bzero(buffer,256);
-					n = rs_recv(newsockfd,buffer, MSG_SIZE, 0);
-					if (n < 0) error("ERROR reading from socket");
-					printf("Here is the message: %s\n",buffer);
-					if (buffer[0] == '\0') {
-						rs_close(newsockfd);
-						break;
-					}
-					n = rs_send(newsockfd, response, MSG_SIZE, 0);
-					if (n < 0) error("ERROR writing to socket");
-				}
+
+				fds[nextfd].fd = newsockfd;
+				fds[nextfd].events = POLLIN;
+				fds[nextfd].revents = 0;
+				nextfd++;
 			}
 
+		}
+
+		for (i = 1; i <= 1024; i++) {
+			if (fds[i].fd < 0  || !fds[i].revents)
+				continue;
+
+			if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+				printf("ERROR: revent  0x%x, POLLERR 0x%x, POLLHUP 0x%x, POLLNVAL 0x%x\n",fds[0].revents, POLLERR, POLLHUP, POLLNVAL);
+				continue;
+			}
+
+			if (fds[i].revents & POLLIN) {
+				bzero(buffer,256);
+				n = rs_recv(fds[i].fd, buffer, MSG_SIZE, 0);
+				if (n < 0) error("ERROR reading from socket");
+				printf("Here is the message: %s\n",buffer);
+				if (buffer[0] == '\0') {
+					rs_close(fds[i].fd);
+					fds[i].fd = -1;
+					fds[i].events = 0;
+					fds[i].revents = 0;
+				} else {
+					n = rs_send(fds[i].fd, response, MSG_SIZE, 0);
+					if (n < 0) error("ERROR writing to socket");
+					fds[i].revents = 0;
+				}
+				continue;
+			}
 		}
 	}
 	rs_close(sockfd);
