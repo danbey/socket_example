@@ -32,6 +32,7 @@
 #include <infiniband/ib.h>
 
 #define MSG_SIZE 255
+#define MAX_NUM_RSOCKET 1024
 
 #ifndef USE_RS
 #define USE_RS 0
@@ -71,16 +72,19 @@ void error(const char *msg)
 
 void run_client(int use_rgai,char *addr, char *port)
 {
-	int sockfd, n, rt;
+	int sockfd, n, rt, i;
 	struct sockaddr_in serv_addr;
 	char buffer[256] = "JOPA" , out[256];
-	struct pollfd fds[1];
+	struct pollfd fds[MAX_NUM_RSOCKET];
 	int portno;
 	struct rdma_addrinfo *rai = NULL;
 	struct  addrinfo *ai;
-	int count = 1;
+	int msg_count = 1, sock_count;
 
-	portno = atoi(port);
+	memset(fds, 0, sizeof(fds));
+
+	for (i = 0; i < MAX_NUM_RSOCKET; i++)
+		fds[i].fd = -1;
 
 	rt = use_rgai ? rdma_getaddrinfo(addr, port, &rai_hints, &rai) :
 		getaddrinfo(addr, port, &ai_hints, &ai);
@@ -114,41 +118,61 @@ void run_client(int use_rgai,char *addr, char *port)
 
 	while (1) {
 		fds[0].revents = 0;
-		rt = rs_poll(fds, 1, -1);
+		rt = rs_poll(fds, MAX_NUM_RSOCKET, -1);
 		if (rt < 0)
 			error("polling error");
 
-		if (fds[0].revents) {
-			if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
-				printf("ERROR: revent  0x%x, POLLERR 0x%x, POLLHUP 0x%x, POLLNVAL 0x%x\n",fds[0].revents, POLLERR, POLLHUP, POLLNVAL);
-				break;
-			}
-			if (fds[0].revents & POLLOUT) {
-				if (count < 10) {
-					strcpy(buffer, "JOPA");
-					count++;
-				} else {
-					memset(buffer, 0, sizeof(buffer));
-					count = 0;
+		for (i = 0; i < MAX_NUM_RSOCKET; i++) {
+
+			if (fds[i].fd < 0)
+				continue;
+
+			if (fds[i].revents) {
+				if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
+					printf("ERROR: revent  0x%x, POLLERR 0x%x, POLLHUP 0x%x, POLLNVAL 0x%x"
+							"position %d, socket %d\n",
+							fds[i].revents, POLLERR, POLLHUP, POLLNVAL, i, fds[i].fd);
+					rs_close(fds[i].fd);
+					fds[i].fd = -1;
+					fds[i].events = 0;
+					fds[i].revents = 0;
+					continue;
+				}
+				if (fds[i].revents & POLLOUT) {
+					if (msg_count < 10) {
+						strcpy(buffer, "JOPA");
+						msg_count++;
+					} else {
+						memset(buffer, 0, sizeof(buffer));
+						msg_count = 0;
+					}
+
+					n = rs_send(fds[i].fd, buffer, MSG_SIZE, 0);
+					if (n < 0) {
+						char msg[512];
+						sprintf(msg,"ERROR writing to socket. position %d, socket %d", i, fds[i].fd);
+						error(msg);
+					}
+					fds[i].events = POLLIN;
+					continue;
 				}
 
-				n = rs_send(sockfd, buffer, MSG_SIZE, 0);
-				if (n < 0)
-					error("ERROR writing to socket");
-				fds[0].events = POLLIN;
-			}
-
-			if (fds[0].revents & POLLIN) {
-				out[0] = '\0';
-				n = rs_recv(sockfd, out, MSG_SIZE, 0);
-				if (n < 0)
-					error("ERROR reading from socket");
-				printf("%s\n",out);
-				fds[0].events = POLLOUT;
+				if (fds[i].revents & POLLIN) {
+					out[0] = '\0';
+					n = rs_recv(fds[i].fd, out, MSG_SIZE, 0);
+					if (n < 0) {
+						char msg[512];
+						sprintf(msg,"ERROR reading to socket. position %d, socket %d", i, fds[i].fd);
+						error(msg);
+					}
+					printf("%s\n",out);
+					fds[i].events = POLLOUT;
+					continue;
+				}
 			}
 		}
 	}
-	rs_close(sockfd);
+//	rs_close(sockfd);
 }
 
 void run_server(int use_rgai, char *addr, char *port)
@@ -160,12 +184,12 @@ void run_server(int use_rgai, char *addr, char *port)
 	int i, n, rt;
 	struct rdma_addrinfo *rai = NULL;
 	struct addrinfo *ai;
-	struct pollfd fds[1024];
+	struct pollfd fds[MAX_NUM_RSOCKET];
 	int nextfd = 1;
 
 	memset(fds, 0, sizeof(fds));
 
-	for (i = 0; i <= 1024; i++)
+	for (i = 0; i < MAX_NUM_RSOCKET; i++)
 		fds[i].fd = -1;
 
 	if (use_rgai) {
@@ -195,7 +219,7 @@ void run_server(int use_rgai, char *addr, char *port)
 	fds[0].revents = 0;
 
 	while (1) {
-		rt = rs_poll(fds, 1024, -1);
+		rt = rs_poll(fds, MAX_NUM_RSOCKET, -1);
 		if (rt < 0)
 			error("polling error");
 
@@ -214,6 +238,12 @@ void run_server(int use_rgai, char *addr, char *port)
 				if (newsockfd < 0)
 					error("ERROR on accept");
 
+				if (nextfd > MAX_NUM_RSOCKET) {
+					rs_close(newsockfd);
+					break;
+				}
+
+				printf("Client %d, sock %d\n",nextfd - 1, newsockfd);
 				fds[nextfd].fd = newsockfd;
 				fds[nextfd].events = POLLIN;
 				fds[nextfd].revents = 0;
@@ -222,12 +252,15 @@ void run_server(int use_rgai, char *addr, char *port)
 
 		}
 
-		for (i = 1; i <= 1024; i++) {
+		for (i = 1; i < MAX_NUM_RSOCKET; i++) {
 			if (fds[i].fd < 0  || !fds[i].revents)
 				continue;
 
 			if (fds[i].revents & (POLLERR | POLLHUP | POLLNVAL)) {
 				printf("ERROR: revent  0x%x, POLLERR 0x%x, POLLHUP 0x%x, POLLNVAL 0x%x\n",fds[0].revents, POLLERR, POLLHUP, POLLNVAL);
+				fds[i].fd = -1;
+				fds[i].events = 0;
+				fds[i].revents = 0;
 				continue;
 			}
 
@@ -235,7 +268,7 @@ void run_server(int use_rgai, char *addr, char *port)
 				bzero(buffer,256);
 				n = rs_recv(fds[i].fd, buffer, MSG_SIZE, 0);
 				if (n < 0) error("ERROR reading from socket");
-				printf("Here is the message: %s\n",buffer);
+				//printf("Here is the message: %s\n",buffer);
 				if (buffer[0] == '\0') {
 					rs_close(fds[i].fd);
 					fds[i].fd = -1;
