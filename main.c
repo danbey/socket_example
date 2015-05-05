@@ -32,7 +32,7 @@
 #include <infiniband/ib.h>
 
 #define MSG_SIZE 255
-#define MAX_NUM_RSOCKET 1024
+#define MAX_NUM_RSOCKET 1024 * 10
 #define MAX_MSG_COUNT 1024
 
 #ifndef USE_RS
@@ -148,8 +148,8 @@ void run_client(int use_rgai,char *addr, char *port)
 					continue;
 				}
 				if (fds[i].revents & POLLOUT) {
-					if (msg_count < MAX_MSG_COUNT ) {
-						strcpy(buffer, "JOPA");
+					if (/*msg_count < MAX_MSG_COUNT*/1 ) {
+						sprintf(buffer, "client id %d sock %d count %d",i,fds[i].fd,msg_count);
 						msg_count++;
 					} else {
 						memset(buffer, 0, sizeof(buffer));
@@ -277,7 +277,7 @@ void run_server(int use_rgai, char *addr, char *port)
 				bzero(buffer,256);
 				n = rs_recv(fds[i].fd, buffer, MSG_SIZE, 0);
 				if (n < 0) error("ERROR reading from socket");
-				//printf("Here is the message: %s\n",buffer);
+				printf("Here is the message: %s\n",buffer);
 				if (buffer[0] == '\0') {
 					rs_close(fds[i].fd);
 					fds[i].fd = -1;
