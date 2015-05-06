@@ -32,7 +32,7 @@
 #include <infiniband/ib.h>
 
 #define MSG_SIZE 255
-#define MAX_NUM_RSOCKET 1024 * 10
+#define MAX_NUM_RSOCKET 4000
 #define MAX_MSG_COUNT 1024
 
 #ifndef USE_RS
